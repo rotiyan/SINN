@@ -54,6 +54,7 @@ class StatLoss(_Loss, metaclass=ABCMeta):
     @staticmethod
     def acf(x, lags=None, method='fft'):
         x = x - x.mean()
+        T = x.shape[0]
         if method == 'fft':
             f = torch.fft.fft(x, x.shape[0] * 2 - 1, dim=0)
             acf = torch.fft.ifft(
