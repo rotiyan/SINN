@@ -100,8 +100,6 @@ class StatLoss(_Loss, metaclass=ABCMeta):
             return acf_all[desired_lags].unsqueeze(-1)
         else:
             raise NotImplementedError(f'Unknown method {method}.')
-        else:
-            raise NotImplementedError(f'Unknown method {method}.')
 
     @staticmethod
     def gauss_kde(x, lower, upper, n, bw=None):
