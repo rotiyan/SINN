@@ -63,27 +63,43 @@ class StatLoss(_Loss, metaclass=ABCMeta):
             ].mean(axis=1)
             return acf[:lags, ...] / acf[0, ...]
         elif method == 'bruteforce':
+            x_squeeze = x.squeeze(-1)  
+        
+            # Compute cross-correlation matrix M.
+            # M[i, j] = sum_{c} x_squeeze[i, c] * x_squeeze[j, c]
+            M = torch.matmul(x_squeeze, x_squeeze.T)  
+        
+            # For each lag k, get the numerator as the sum of the k-th diagonal of M.
+            num = torch.stack([torch.diagonal(M, offset=k).sum() for k in range(T)])  # shape: (T,)
+        
+            # 5Compute denominator: first sum squares of x over channels for each time.
+            s = (x_squeeze ** 2).sum(dim=1)  # shape: (T,)
+            # Prepend zero to compute cumulative sums easily.
+            cumsum_s = torch.cat([torch.zeros(1, device=x.device), torch.cumsum(s, dim=0)])
+            # For each lag k, define:
+            #  S1(k) = sum_{t=0}^{T-k-1} s[t] = cumsum_s[T-k]
+            #  S2(k) = sum_{t=k}^{T-1} s[t] = cumsum_s[T] - cumsum_s[k]
+            denom = torch.sqrt(torch.stack(
+                [cumsum_s[T - k] * (cumsum_s[T] - cumsum_s[k]) for k in range(T)]
+            ))
+        
+            # For safety, add a very small epsilon to the denominator.
+            eps = 1e-8
+            acf_all = num / (denom + eps)  # shape: (T,)
+        
+            # 6. Determine the desired lags.
             if lags is None:
-                lags = torch.arange(x.shape[0])
+                 desired_lags = torch.arange(T, device=x.device)
             elif isinstance(lags, int):
-                lags = torch.arange(lags)
+                 desired_lags = torch.arange(lags, device=x.device)
             else:
-                lags = torch.tensor(lags, dtype=torch.int32)
-            corr = torch.zeros((len(lags), *x.shape[2:]), device=x.device)
-            for i, lag in enumerate(lags):
-                if lag == 0:
-                    u = v = x
-                elif lag < x.shape[0]:
-                    u, v = x[:-lag, ...], x[lag:, ...]
-                else:
-                    continue
-                corr[i, ...] = torch.sum(u * v, axis=[0, 1]) / (
-                    torch.sqrt(
-                        torch.sum(torch.square(u), axis=[0, 1]) *
-                        torch.sum(torch.square(v), axis=[0, 1])
-                    )
-                )
-            return corr
+                desired_lags = torch.tensor(lags, dtype=torch.long, device=x.device)
+        
+            # Return results in a shape that preserves the extra dimension
+            # so that the output shape is (len(desired_lags), 1)
+            return acf_all[desired_lags].unsqueeze(-1)
+        else:
+            raise NotImplementedError(f'Unknown method {method}.')
         else:
             raise NotImplementedError(f'Unknown method {method}.')
 
