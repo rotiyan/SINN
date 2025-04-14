@@ -108,7 +108,6 @@ class StatLoss(_Loss, metaclass=ABCMeta):
         grid = torch.linspace(lower, upper, n, device=x.device)
         if bw is None:
             bw = len(x)**(-1 / 5)
-        print( 'BW here: ',bw)
         norm_factor = (2 * np.pi)**0.5 * len(x) * bw
         return torch.sum(
             torch.exp(
@@ -225,7 +224,7 @@ class DensityLoss(StatLoss):
         '''
         return cls(
             cls.gauss_kde(data, lower=lower, upper=upper, n=n, bw=bw),
-            **options, lower=lower, upper=upper, n=n
+            **options, lower=lower, upper=upper, n=n, bw=bw
         )
 
     def forward(self, input):
