@@ -240,51 +240,199 @@ class DensityLoss(StatLoss):
         return self._loss(_input, self._target)
 
 
+class VarianceProfileLoss(StatLoss):
+    '''Match the time-dependent variance profile Var[X(t)] at each time step.
+
+    The standard DensityLoss collapses all time steps into one distribution,
+    making it blind to the transient spreading of the process from its initial
+    conditions. This loss explicitly penalises deviations in the dispersion
+    growth rate — the key driver of how quickly EPE builds up over time.
+    '''
+
+    @classmethod
+    def from_empirical_data(cls, data, **options):
+        '''
+        Parameters
+        ----------
+        data: tensor of shape (T, batch, vars)
+        '''
+        return cls(data.var(dim=1), **options)
+
+    def forward(self, input):
+        '''
+        Parameters
+        ----------
+        input: tensor of shape (T, batch, vars)
+        '''
+        return self._loss(input.var(dim=1), self._target)
+
+
+class MeanProfileLoss(StatLoss):
+    '''Match the time-dependent mean profile E[X(t)] at each time step.
+
+    Captures the expected trajectory of the process — essential when the
+    stressed scenario has a different drift from the nominal scenario
+    (e.g. rate shocks, trend changes).
+    '''
+
+    @classmethod
+    def from_empirical_data(cls, data, **options):
+        '''
+        Parameters
+        ----------
+        data: tensor of shape (T, batch, vars)
+        '''
+        return cls(data.mean(dim=1), **options)
+
+    def forward(self, input):
+        '''
+        Parameters
+        ----------
+        input: tensor of shape (T, batch, vars)
+        '''
+        return self._loss(input.mean(dim=1), self._target)
+
+
+class EPEProfileLoss(StatLoss):
+    '''Match the Expected Positive Exposure profile EPE(t) = E[max(X(t), 0)]
+    at each time step.
+
+    This directly targets the risk metric used for EAD and PFE calculations.
+    Because EPE depends on both the mean path and the growing dispersion of
+    the distribution, matching it jointly constrains both, with the correct
+    emphasis for counterparty credit risk applications.
+    '''
+
+    @classmethod
+    def from_empirical_data(cls, data, **options):
+        '''
+        Parameters
+        ----------
+        data: tensor of shape (T, batch, vars)
+        '''
+        return cls(torch.relu(data).mean(dim=1), **options)
+
+    def forward(self, input):
+        '''
+        Parameters
+        ----------
+        input: tensor of shape (T, batch, vars)
+        '''
+        return self._loss(torch.relu(input).mean(dim=1), self._target)
+
+
+class TimeSlicePDFLoss(StatLoss):
+    '''Match the cross-sectional PDF at a selected set of time horizons.
+
+    Unlike DensityLoss, which averages over all time steps, this loss
+    compares the full distribution P(X(t)) at each specified horizon
+    independently. This captures the entire transient evolution of the
+    distribution — from a narrow inception-time distribution to the
+    wider long-horizon distribution — enabling the model to reproduce
+    the correct dispersion dynamics at each reporting date.
+    '''
+
+    @classmethod
+    def from_empirical_data(cls, data, time_indices, lower, upper, n,
+                            bw=None, **options):
+        '''
+        Parameters
+        ----------
+        data: tensor of shape (T, batch, vars)
+        time_indices: list of int
+            Time steps at which to evaluate the cross-sectional PDF.
+        lower, upper: float
+            Support of the KDE grid.
+        n: int
+            Number of grid points.
+        bw: float or None
+            KDE bandwidth. Defaults to Silverman's rule if None.
+        '''
+        targets = torch.stack([
+            cls.gauss_kde(data[t], lower=lower, upper=upper, n=n, bw=bw)
+            for t in time_indices
+        ])  # shape: (n_slices, n)
+        return cls(
+            targets, **options,
+            time_indices=list(time_indices), lower=lower, upper=upper,
+            n=n, bw=bw
+        )
+
+    def forward(self, input):
+        '''
+        Parameters
+        ----------
+        input: tensor of shape (T, batch, vars)
+        '''
+        preds = torch.stack([
+            self.gauss_kde(input[t], lower=self.lower, upper=self.upper,
+                           n=self.n, bw=self.bw)
+            for t in self.time_indices
+        ])
+        return self._loss(preds, self._target)
+
+
 def make_loss(stat, data, loss_type=['mse_loss', 'l1_loss'], **kwargs):
     '''
     Create a loss function.
 
     Parameters
     ----------
-    stat: 'pdf' or 'acf[fft]' or 'acf[bruteforce]' or 'acf[randombrute]'
-        Statistics to compute
+    stat: str
+        Which statistic to match. One of:
+          - 'pdf'                : time-averaged marginal density (stationary)
+          - 'acf[fft]'           : ACF via FFT (assumes stationarity)
+          - 'acf[bruteforce]'    : ACF via brute-force
+          - 'acf[randombrute]'   : ACF via random-lag brute-force
+          - 'variance_profile'   : time-dependent variance Var[X(t)]
+          - 'mean_profile'       : time-dependent mean E[X(t)]
+          - 'epe_profile'        : EPE(t) = E[max(X(t), 0)] at each time step
+          - 'time_slice_pdf'     : cross-sectional PDF at selected horizons
     data: tensor
-        Target statistics function or sample trajectories.
+        Either a pre-computed target statistic (1D or 2D) or a batch of
+        empirical trajectories of shape (T, batch, vars).
     loss_type: list
-        Lower-levle loss functions to use.
+        Lower-level pointwise loss names (from torch.nn.functional).
     kwargs:
-        additional arguments to pass to the loss function
+        Additional arguments forwarded to the loss constructor, e.g.:
+          - lags (int)           : for ACF losses
+          - lower, upper, n, bw  : for PDF / time_slice_pdf losses
+          - time_indices (list)  : for time_slice_pdf
+          - device (str)         : target tensor device
 
     Returns
     -------
     loss: callable
-        A loss function
+        A loss function instance.
     '''
-    if stat == 'pdf':
-        loss_cls = DensityLoss
-    elif stat == 'acf[fft]':
-        loss_cls = ACFLoss
-    elif stat == 'acf[bruteforce]':
-        loss_cls = BruteForceACFLoss
-    elif stat == 'acf[randombrute]':
-        loss_cls = RandomBruteForceACFLoss
-    else:
-        raise RuntimeError(f'Unknown stat {stat}.')
+    _STAT_MAP = {
+        'pdf':              DensityLoss,
+        'acf[fft]':         ACFLoss,
+        'acf[bruteforce]':  BruteForceACFLoss,
+        'acf[randombrute]': RandomBruteForceACFLoss,
+        'variance_profile': VarianceProfileLoss,
+        'mean_profile':     MeanProfileLoss,
+        'epe_profile':      EPEProfileLoss,
+        'time_slice_pdf':   TimeSlicePDFLoss,
+    }
+    if stat not in _STAT_MAP:
+        raise RuntimeError(
+            f"Unknown stat '{stat}'. Choose from: {list(_STAT_MAP.keys())}"
+        )
+    loss_cls = _STAT_MAP[stat]
 
     def lower_level_loss(a, b):
         return torch.sum([getattr(F, ls)(a, b) for ls in loss_type])
 
-    if len(data.shape) == 1:
-        return loss_cls(
-            data,
-            loss=lower_level_loss,
-            **kwargs
-        )
-    elif len(data.shape) == 3:
-        return loss_cls.from_empirical_data(
-            data,
-            loss=lower_level_loss,
-            **kwargs
-        )
+    ndim = len(data.shape)
+    if ndim in (1, 2):
+        # Pre-computed target passed directly
+        return loss_cls(data, loss=lower_level_loss, **kwargs)
+    elif ndim == 3:
+        # Empirical trajectories of shape (T, batch, vars)
+        return loss_cls.from_empirical_data(data, loss=lower_level_loss, **kwargs)
     else:
-        raise RuntimeError('Unknown truth data format.')
+        raise RuntimeError(
+            f'Unexpected data shape {data.shape}. '
+            'Expected 1D/2D pre-computed target or 3D (T, batch, vars) trajectories.'
+        )
