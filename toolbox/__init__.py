@@ -1,7 +1,12 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 from ._loss import (  # noqa: F401, F403
-    make_loss, StatLoss
+    make_loss,
+    StatLoss,
+    VarianceProfileLoss,
+    MeanProfileLoss,
+    EPEProfileLoss,
+    TimeSlicePDFLoss,
 )
 from ._generator import (
     FPU
